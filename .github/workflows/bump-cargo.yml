@@ -1,0 +1,42 @@
+name: bump-cargo-version
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  bump-cargo-version:
+    name: bump cargo version
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@v3
+      with:
+        ref: ${{ github.event.release.tag_name }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Checkout a new branch for the version bump
+      run: |
+        export BRANCH_NAME="version-bump-${{ github.event.release.tag_name }}"
+        git checkout -b $BRANCH_NAME
+    
+    - name: Update Cargo.toml version
+      run: |
+        chmod +x ./scripts/update_version.sh
+        ./scripts/update_version.sh "${{ github.event.release.tag_name }}"
+        git add Cargo.toml
+        git commit -m "Bump version to ${{ github.event.release.tag_name }}"
+    
+    - name: Push the changes to the new branch
+      run: |
+        git push origin HEAD:$BRANCH_NAME
+    
+    - name: Install GitHub CLI
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gh
+    
+    - name: Create Pull Request
+      run: |
+        gh auth login --with-token ${{ secrets.GITHUB_TOKEN }}
+        gh pr create --title "Bump version to ${{ github.event.release.tag_name }}" --body "Updated Cargo.toml version" --base main --head $BRANCH_NAME
