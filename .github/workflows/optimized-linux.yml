@@ -1,0 +1,108 @@
+name: Optimized Linux node
+
+on:
+  pull_request:
+    branches: [dz-free-pubdata]
+  push:
+    branches: [dz-free-pubdata]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config libssl-dev clang
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Build optimized node
+        run: cargo build --release --locked
+      - name: Smoke test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          target/release/era_test_node --version
+          target/release/era_test_node --log error run > node.log 2>&1 &
+          node_pid=$!
+          trap 'kill "$node_pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import json, time, urllib.request
+          def rpc(method, params):
+              data = json.dumps(dict(jsonrpc="2.0", id=1, method=method, params=params)).encode()
+              req = urllib.request.Request("http://127.0.0.1:8011", data=data, headers={"Content-Type": "application/json"})
+              with urllib.request.urlopen(req, timeout=2) as response:
+                  result = json.load(response)
+              if "error" in result:
+                  raise RuntimeError(result["error"])
+              return result["result"]
+          for attempt in range(30):
+              try:
+                  chain_id = rpc("eth_chainId", [])
+                  break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Node did not start")
+          assert chain_id == "0x104", chain_id
+          checkpoint = rpc("evm_snapshot", [])
+          assert rpc("evm_revert", [checkpoint]) is True
+          PY
+      - name: Package binary
+        run: |
+          mkdir dist
+          tar -czf dist/era_test_node-linux-x86_64.tar.gz -C target/release era_test_node
+          cd dist
+          sha256sum era_test_node-linux-x86_64.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: era-test-node-linux-x86_64
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: node-smoke-log
+          path: node.log
+          if-no-files-found: ignore
+
+  action-smoke:
+    name: Test packaged binary through action
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: era-test-node-linux-x86_64
+          path: dist
+      - name: Verify and serve release archive
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS
+          nohup python3 -m http.server 18080 --bind 127.0.0.1 > ../archive-server.log 2>&1 &
+          for _ in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:18080/era_test_node-linux-x86_64.tar.gz -o /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - name: Start packaged node through existing action
+        uses: gravity-technologies/era-test-node-action@b0202a538000521290958d046850a6183378b893
+        with:
+          releaseTag: 0.1.0-optimized-smoke
+          downloadUrlOverride: http://127.0.0.1:18080/era_test_node-linux-x86_64.tar.gz
+          log: error
+      - name: Check chain ID through RPC
+        run: |
+          curl --fail --silent -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+            http://127.0.0.1:8011 | jq -e '.result == "0x104"'
