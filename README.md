@@ -1,3 +1,27 @@
+## Optimized release builds
+
+Release builds use ThinLTO, which optimizes across Rust crates, and one code generation unit.
+These settings can reduce runtime overhead without changing the Rust source or the VM rules.
+They also increase build time.
+
+Use the pinned toolchain and the native prerequisites described below, then run:
+
+```sh
+cargo build --release --locked
+```
+
+The binary is `target/release/era_test_node`.
+The same settings apply to the release workflow through `cross build --release`.
+The free-pubdata branch retains its existing large-contract behavior.
+
+To use a new release with `gravity-technologies/era-test-node-action`, set `releaseTag` to the new tag.
+Set `downloadUrlOverride` to the release asset download URL.
+Give the release a new tag so that persistent runners do not reuse the previous cached binary.
+Package `era_test_node` at the root of the release archive.
+The action downloads a binary archive, not a Docker image.
+
+---
+
 <div align="center">
 <a href="https://era.zksync.io/docs/tools/testing/era-test-node.html">
 

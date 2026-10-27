@@ -64,3 +64,7 @@ sha3 = { git = "https://github.com/RustCrypto/hashes", tag = "sha3-v0.10.6" }
 
 [profile.dev]
 debug = 0
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
