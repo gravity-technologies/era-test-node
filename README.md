@@ -20,6 +20,28 @@ Give the release a new tag so that persistent runners do not reuse the previous 
 Package `era_test_node` at the root of the release archive.
 The action downloads a binary archive, not a Docker image.
 
+
+## Snapshot storage
+
+Copying every storage map makes repeated snapshots slow.
+Snapshots share storage values and bytecode until a write changes them.
+Each write copies shared data before it changes a value.
+This keeps saved snapshots and historical blocks separate from later writes.
+Each block archive reads storage under its own lock, so another storage owner can change values between archives.
+The node uses this storage for every snapshot and historical block.
+
+RPC methods, snapshot IDs, block history, gas rules, and signature checks stay the same.
+`InMemoryNodeInner::previous_states` now stores `SharedMap` values.
+Rust callers that insert a `HashMap` must convert it with `.into()`.
+The normal map methods and debug format stay available.
+
+On macOS arm64 with Node 20.20.2, the full Hardhat suite took 242.30 seconds before this change and 151.82 seconds afterward.
+A second run took 152.90 seconds.
+Both binaries used the same pinned Rust compiler, ThinLTO, and one code generation unit.
+Both runs passed 3,101 tests and kept 22 existing skips.
+The comparison excludes compilation and does not measure Linux CI performance.
+Corresponding signed transactions, receipts, ordered state reads, rejection fields, and normal logs matched after timestamp removal.
+
 ---
 
 <div align="center">

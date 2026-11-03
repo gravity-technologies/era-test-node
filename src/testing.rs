@@ -981,10 +981,12 @@ mod test {
                         input_l2_block,
                         input_timestamp,
                     ))
-                },
+                }
+                .into(),
                 factory_deps: hashmap! {
                     H256::repeat_byte(0x1) => input_bytecode.clone(),
-                },
+                }
+                .into(),
             },
         };
 
