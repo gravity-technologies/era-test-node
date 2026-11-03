@@ -54,6 +54,27 @@ jobs:
           assert chain_id == "0x104", chain_id
           checkpoint = rpc("evm_snapshot", [])
           assert rpc("evm_revert", [checkpoint]) is True
+          account = "0x0000000000000000000000000000000000000042"
+          balance = rpc("eth_getBalance", [account, "latest"])
+          nonce = rpc("eth_getTransactionCount", [account, "latest"])
+          outer = rpc("evm_snapshot", [])
+          rpc("hardhat_setBalance", [account, "0x64"])
+          rpc("hardhat_setNonce", [account, "0x1"])
+          inner = rpc("evm_snapshot", [])
+          rpc("hardhat_setBalance", [account, "0xc8"])
+          rpc("hardhat_setNonce", [account, "0x2"])
+          assert rpc("evm_revert", [inner]) is True
+          assert rpc("eth_getBalance", [account, "latest"]) == "0x64"
+          assert rpc("eth_getTransactionCount", [account, "latest"]) == "0x1"
+          try:
+              rpc("evm_revert", [inner])
+          except RuntimeError:
+              pass
+          else:
+              raise AssertionError("Consumed snapshot ID remained valid")
+          assert rpc("evm_revert", [outer]) is True
+          assert rpc("eth_getBalance", [account, "latest"]) == balance
+          assert rpc("eth_getTransactionCount", [account, "latest"]) == nonce
           PY
       - name: Package binary
         run: |

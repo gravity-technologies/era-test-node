@@ -2394,7 +2394,8 @@ mod tests {
                     historical_block.hash,
                     hashmap! {
                         input_storage_key => input_storage_value,
-                    },
+                    }
+                    .into(),
                 );
                 writer
                     .blocks

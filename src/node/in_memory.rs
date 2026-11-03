@@ -2,7 +2,7 @@
 use crate::{
     bootloader_debug::{BootloaderDebug, BootloaderDebugTracer},
     console_log::ConsoleLogHandler,
-    deps::{storage_view::StorageView, InMemoryStorage},
+    deps::{shared_map::SharedMap, storage_view::StorageView, InMemoryStorage},
     filters::EthFilters,
     fork::{block_on, ForkDetails, ForkSource, ForkStorage},
     formatter,
@@ -331,7 +331,7 @@ pub struct InMemoryNodeInner<S> {
     pub impersonated_accounts: HashSet<Address>,
     pub rich_accounts: HashSet<H160>,
     /// Keeps track of historical states indexed via block hash. Limited to [MAX_PREVIOUS_STATES].
-    pub previous_states: IndexMap<H256, HashMap<StorageKey, StorageValue>>,
+    pub previous_states: IndexMap<H256, SharedMap<StorageKey, StorageValue>>,
     /// An optional handle to the observability stack
     pub observability: Option<Observability>,
 }
@@ -889,7 +889,7 @@ pub struct Snapshot {
     pub(crate) filters: EthFilters,
     pub(crate) impersonated_accounts: HashSet<Address>,
     pub(crate) rich_accounts: HashSet<H160>,
-    pub(crate) previous_states: IndexMap<H256, HashMap<StorageKey, StorageValue>>,
+    pub(crate) previous_states: IndexMap<H256, SharedMap<StorageKey, StorageValue>>,
     pub(crate) raw_storage: InMemoryStorage,
     pub(crate) value_read_cache: HashMap<StorageKey, H256>,
     pub(crate) factory_dep_cache: HashMap<H256, Option<Vec<u8>>>,
@@ -1767,6 +1767,177 @@ mod tests {
     use crate::{
         http_fork_source::HttpForkSource, node::InMemoryNode, system_contracts::Options, testing,
     };
+
+    #[test]
+    fn test_shared_nested_snapshot_consumption_and_restored_branches() {
+        let node = InMemoryNode::<HttpForkSource>::default();
+        let key = StorageKey::new(
+            zksync_types::AccountTreeId::new(H160::repeat_byte(0x61)),
+            H256::zero(),
+        );
+        let mut external = node.get_inner().read().unwrap().fork_storage.clone();
+        external.set_value(key, H256::repeat_byte(1));
+        let first = node.snapshot().unwrap();
+        external.set_value(key, H256::repeat_byte(2));
+        let second = node.snapshot().unwrap();
+        external.set_value(key, H256::repeat_byte(3));
+        let third = node.snapshot().unwrap();
+        external.set_value(key, H256::repeat_byte(4));
+        assert!(node.revert_snapshot(second).unwrap());
+        assert!(node.revert_snapshot(second).is_err());
+        assert!(node.revert_snapshot(third).is_err());
+        assert_eq!(external.read_value(&key), H256::repeat_byte(2));
+        external.set_value(key, H256::repeat_byte(5));
+        let reused = node.snapshot().unwrap();
+        assert_eq!(reused, second);
+        assert!(node.revert_snapshot(first).unwrap());
+        assert_eq!(external.read_value(&key), H256::repeat_byte(1));
+        assert!(node.revert_snapshot(reused).is_err());
+    }
+
+    #[test]
+    fn test_shared_archive_eviction_keeps_existing_129_entry_order() {
+        let node = InMemoryNode::<HttpForkSource>::default();
+        let node_inner = node.get_inner();
+        let mut inner = node_inner.write().unwrap();
+        let key = StorageKey::new(
+            zksync_types::AccountTreeId::new(H160::repeat_byte(0x71)),
+            H256::zero(),
+        );
+        for number in 0..132u64 {
+            inner.current_miniblock_hash = H256::from_low_u64_be(number);
+            inner
+                .fork_storage
+                .set_value(key, H256::from_low_u64_be(number));
+            inner.archive_state().unwrap();
+        }
+        assert_eq!(inner.previous_states.len(), 129);
+        let hashes: Vec<_> = inner.previous_states.keys().copied().collect();
+        assert_eq!(
+            hashes,
+            (3..132u64).map(H256::from_low_u64_be).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            inner
+                .previous_states
+                .get(&H256::from_low_u64_be(3))
+                .unwrap()
+                .get(&key),
+            Some(&H256::from_low_u64_be(3))
+        );
+        assert_eq!(
+            inner
+                .previous_states
+                .get(&H256::from_low_u64_be(131))
+                .unwrap()
+                .get(&key),
+            Some(&H256::from_low_u64_be(131))
+        );
+    }
+
+    #[test]
+    fn test_shared_snapshot_storage_detaches_external_writes_and_history_mutation() {
+        let node = InMemoryNode::<HttpForkSource>::default();
+        let node_inner = node.get_inner();
+        let mut inner = node_inner.write().unwrap();
+        let key = StorageKey::new(
+            zksync_types::AccountTreeId::new(H160::repeat_byte(0x41)),
+            H256::zero(),
+        );
+        let bytecode = H256::repeat_byte(0x42);
+        let old_hash = H256::repeat_byte(0x43);
+        inner.fork_storage.set_value(key, H256::repeat_byte(1));
+        inner.fork_storage.store_factory_dep(bytecode, vec![1, 2]);
+        inner.current_miniblock_hash = old_hash;
+        inner.archive_state().unwrap();
+        let snapshot = inner.snapshot().unwrap();
+        let external = inner.fork_storage.clone();
+        std::thread::spawn(move || {
+            let mut external = external;
+            external.set_value(key, H256::repeat_byte(2));
+            external
+                .inner
+                .write()
+                .unwrap()
+                .raw_storage
+                .factory_deps
+                .get_mut(&bytecode)
+                .unwrap()
+                .push(3);
+        })
+        .join()
+        .unwrap();
+        inner
+            .previous_states
+            .get_mut(&old_hash)
+            .unwrap()
+            .insert(key, H256::repeat_byte(3));
+        assert_eq!(
+            snapshot.raw_storage.state.get(&key),
+            Some(&H256::repeat_byte(1))
+        );
+        assert_eq!(
+            snapshot.raw_storage.factory_deps.get(&bytecode),
+            Some(&vec![1, 2])
+        );
+        assert_eq!(
+            snapshot.previous_states.get(&old_hash).unwrap().get(&key),
+            Some(&H256::repeat_byte(1))
+        );
+        inner.restore_snapshot(snapshot.clone()).unwrap();
+        assert_eq!(inner.fork_storage.read_value(&key), H256::repeat_byte(1));
+        assert_eq!(
+            inner
+                .fork_storage
+                .inner
+                .read()
+                .unwrap()
+                .raw_storage
+                .factory_deps
+                .get(&bytecode),
+            Some(&vec![1, 2])
+        );
+        inner.fork_storage.set_value(key, H256::repeat_byte(4));
+        assert_eq!(
+            snapshot.raw_storage.state.get(&key),
+            Some(&H256::repeat_byte(1))
+        );
+    }
+
+    #[test]
+    fn test_shared_archives_capture_external_write_between_each_archive() {
+        let node = InMemoryNode::<HttpForkSource>::default();
+        let node_inner = node.get_inner();
+        let mut inner = node_inner.write().unwrap();
+        let key = StorageKey::new(
+            zksync_types::AccountTreeId::new(H160::repeat_byte(0x51)),
+            H256::zero(),
+        );
+        let first = H256::repeat_byte(0x52);
+        let second = H256::repeat_byte(0x53);
+        inner.fork_storage.set_value(key, H256::repeat_byte(1));
+        inner.current_miniblock_hash = first;
+        inner.archive_state().unwrap();
+        let mut external = inner.fork_storage.clone();
+        std::thread::spawn(move || external.set_value(key, H256::repeat_byte(2)))
+            .join()
+            .unwrap();
+        inner.current_miniblock_hash = second;
+        inner.archive_state().unwrap();
+        assert_eq!(
+            inner.previous_states.get(&first).unwrap().get(&key),
+            Some(&H256::repeat_byte(1))
+        );
+        assert_eq!(
+            inner.previous_states.get(&second).unwrap().get(&key),
+            Some(&H256::repeat_byte(2))
+        );
+        inner.fork_storage.set_value(key, H256::repeat_byte(3));
+        assert_eq!(
+            inner.previous_states.get(&second).unwrap().get(&key),
+            Some(&H256::repeat_byte(2))
+        );
+    }
 
     #[tokio::test]
     async fn test_run_l2_tx_validates_tx_gas_limit_too_high() {

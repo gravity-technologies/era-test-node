@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use self::shared_map::SharedMap;
+pub mod shared_map;
 pub mod system_contracts;
 use zksync_types::{
     get_code_key, get_system_context_init_logs, L2ChainId, StorageKey, StorageLog, StorageLogKind,
@@ -10,8 +11,8 @@ use zksync_state::ReadStorage;
 /// In-memory storage.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InMemoryStorage {
-    pub(crate) state: HashMap<StorageKey, StorageValue>,
-    pub(crate) factory_deps: HashMap<H256, Vec<u8>>,
+    pub(crate) state: SharedMap<StorageKey, StorageValue>,
+    pub(crate) factory_deps: SharedMap<H256, Vec<u8>>,
 }
 
 impl InMemoryStorage {
